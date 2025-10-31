@@ -2,7 +2,7 @@ import asyncio
 import os
 import json
 import logging
-import requests
+import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from logging_config import setup_logging
 
 
-# Загружаем переменные окружения 
+# Загружаем переменные окружения
 load_dotenv()
 
 # Получаем токены и ключи
@@ -23,14 +23,13 @@ FOLDER_ID = os.getenv("FOLDER_ID")
 
 # Проверка наличия необходимых переменных
 if not all([BOT_TOKEN, YANDEX_GPT_API_KEY, FOLDER_ID]):
-    raise ValueError("Необходимо задать переменные BOT_TOKEN, YANDEX_GPT_API_KEY и FOLDER_ID в файле .env")
+    raise ValueError("Переменные BOT_TOKEN, YANDEX_GPT_API_KEY и FOLDER_ID должны быть заданы в .env")
 
 # Создаем логгер для текущего модуля
 logger = logging.getLogger(__name__)
 
-# URL для YandexGPT API
-ASYNC_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completionAsync"
-OPERATION_STATUS_URL = "https://operation.api.cloud.yandex.net/operations/"
+# URL для СИНХРОННОГО YandexGPT API
+SYNC_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -63,8 +62,10 @@ def construct_prompt(data: dict) -> str:
     5. Ответ должен быть структурированным, легко читаемым и представлен в дружелюбном тоне.
     """
 
-def start_generation(prompt: str) -> str | None:
-    """Отправляет запрос на асинхронную генерацию и возвращает ID операции."""
+async def get_gpt_route_async(prompt: str) -> str | None:
+    """
+    Асинхронно отправляет запрос к API YandexGPT и возвращает результат.
+    """
     headers = {
         "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}",
         "Content-Type": "application/json"
@@ -77,55 +78,36 @@ def start_generation(prompt: str) -> str | None:
             {"role": "user", "text": prompt}
         ]
     }
+
     try:
-        logger.debug(f"Отправка запроса на генерацию в YandexGPT. Размер промпта: {len(prompt)} символов.")
-        response = requests.post(ASYNC_API_URL, headers=headers, data=json.dumps(body))
-        if response.status_code == 200:
-            op_id = response.json()['id']
-            logger.info(f"Запрос на генерацию успешно отправлен. ID операции: {op_id}")
-            return op_id
-        logger.error(f"Ошибка при запуске генерации: {response.status_code}, {response.text}")
+        # Создаем асинхронную сессию с таймаутом в 45 секунд
+        timeout = aiohttp.ClientTimeout(total=45)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            logger.debug(f"Отправка запроса в YandexGPT. Размер промпта: {len(prompt)} символов.")
+            
+            async with session.post(SYNC_API_URL, headers=headers, json=body) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    result_text = data['result']['alternatives'][0]['message']['text']
+                    logger.info("Ответ от YandexGPT успешно получен.")
+                    return result_text
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Ошибка при обращении к YandexGPT: {response.status}, {error_text}")
+                    return None
+    except asyncio.TimeoutError:
+        logger.error("Запрос к YandexGPT превысил таймаут.")
         return None
     except Exception as e:
-        logger.exception("Исключение при запуске генерации!")
+        logger.exception("Исключение при обращении к YandexGPT!")
         return None
-
-async def await_result(operation_id: str) -> str | None:
-    """Ожидает результат генерации, периодически проверяя статус."""
-    url = f"{OPERATION_STATUS_URL}{operation_id}"
-    headers = {"Authorization": f"Api-Key {YANDEX_GPT_API_KEY}"}
-    
-    for _ in range(30): # Ограничим количество попыток
-        try:
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('done'):
-                    if 'response' in data:
-                        return data['response']['alternatives'][0]['message']['text']
-                    else:
-                        error_message = data.get('error', {}).get('message', 'Неизвестная ошибка в операции')
-                        logger.error(f"Операция {operation_id} завершилась с ошибкой: {error_message}")
-                        return f"Произошла ошибка при генерации маршрута: {error_message}"
-                
-                logger.debug(f"Операция {operation_id} еще не завершена, ждем 5 секунд...")
-                await asyncio.sleep(5)
-            else:
-                logger.error(f"Ошибка при проверке статуса операции {operation_id}: {response.status_code}")
-                return None
-        except Exception as e:
-            logger.exception(f"Исключение при проверке статуса операции {operation_id}!")
-            return None
-    logger.warning(f"Тайм-аут ожидания для операции {operation_id}.")
-    return None
-
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     """Начало диалога по команде /start."""
     logger.info(f"Пользователь {message.from_user.id} ({message.from_user.full_name}) запустил бота.")
-    await message.answer("""Привет! Я твой AI-гид по Нижнему Новгороду.\nРасскажи, что тебе интересно? 🤔\n(например: 🎨 стрит-арт, 🏰 история, ☕️ кофейни)""")
+    await message.answer("Привет! Я твой AI-гид по Нижнему Новгороду.\nРасскажи, что тебе интересно? 🤔\n(например: 🎨 стрит-арт, 🏰 история, ☕️ кофейни)")
     await state.set_state(RouteForm.interests)
 
 @dp.message(RouteForm.interests)
@@ -160,18 +142,13 @@ async def process_location_and_generate(message: types.Message, state: FSMContex
     await state.clear()
     
     logger.info(f"Все данные от пользователя {message.from_user.id} собраны: {user_data}")
-
     await message.answer("Супер! Все данные получил. 🧠 Составляю твой уникальный маршрут... Это может занять около минуты.")
 
     prompt = construct_prompt(user_data)
     logger.debug(f"Сформирован промпт для YandexGPT для пользователя {message.from_user.id}.")
     
-    operation_id = start_generation(prompt)
-    if not operation_id:
-        await message.answer("Прости, не смог запустить генерацию маршрута. Попробуй позже.")
-        return
-        
-    final_route = await await_result(operation_id)
+    # Вызываем асинхронную функцию
+    final_route = await get_gpt_route_async(prompt)
     
     if final_route:
         logger.info(f"Маршрут для пользователя {message.from_user.id} успешно сгенерирован.")
