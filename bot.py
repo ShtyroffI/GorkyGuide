@@ -9,6 +9,7 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 
 # Импортируем логирование
@@ -37,6 +38,17 @@ SYNC_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="🗺️ Построить свой маршрут")
+        ]
+    ],
+    resize_keyboard=True, # Делает кнопки более компактными
+    one_time_keyboard=False, # Клавиатура не будет скрываться после нажатия
+    input_field_placeholder="Нажмите на кнопку, чтобы начать..." # Текст в поле ввода
+)
 
 try:
     with open(DATA_FILE_PATH, 'r', encoding='utf-8') as f:
@@ -175,9 +187,27 @@ async def get_gpt_route_async(prompt: str) -> str | None:
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     """Начало диалога по команде /start."""
-    logger.info(f"Пользователь {message.from_user.id} ({message.from_user.full_name}) запустил бота.")
-    await message.answer("Привет! Я твой AI-гид по Нижнему Новгороду.\nРасскажи, что тебе интересно? 🤔\n(например: 🎨 стрит-арт, 🏰 история, ☕️ кофейни)")
+    if not cultural_data:
+        await message.answer("Извините, сервис временно недоступен.")
+        return
+        
+    logger.info(f"Пользователь {message.from_user.id} запустил бота.")
+    
+    await state.clear() 
+    
+    await message.answer(
+        "Привет! Я твой AI-гид по Нижнему Новгороду. Нажми на кнопку ниже, чтобы начать!",
+        reply_markup=main_keyboard
+    )
+
+@dp.message(F.text == "🗺️ Построить свой маршрут")
+async def handle_build_route_button(message: types.Message, state: FSMContext):
+    """Обрабатывает нажатие на кнопку и запускает FSM."""
+    logger.info(f"Пользователь {message.from_user.id} нажал кнопку 'Построить маршрут'.")
+    await message.answer("Расскажи, что тебе интересно? 🤔")
     await state.set_state(RouteForm.interests)
+
+
 
 @dp.message(RouteForm.interests)
 async def process_interests(message: types.Message, state: FSMContext):
